@@ -1,43 +1,60 @@
 import io
 import uuid
-from fastapi import  UploadFile, File, APIRouter
+from fastapi import  UploadFile, File, APIRouter, Request
 from PIL import Image
-from src.db.connection import client as DB_Client
+from src.db.connection import client as DB_Client, init_db
 from src.shared.constants.db import BOOK_COLLECTION_NAME
-from qdrant_client.models import PointStruct
+from qdrant_client.models import PointStruct, Distance, VectorParams
 from src.utils.embedding import get_img_embedding
+from pydantic import BaseModel
+import urllib.request 
  
 router = APIRouter()
+
  
 @router.post("/upload")
-async def upload_book(
-    file: UploadFile = File(...),
-    title: str = "",
-    author: str = ""
-):
-    if not file.content_type.startswith("image/"):
-        return {"error": "Only image files allowed"}
+async def upload_book(request: Request): 
+    body = await request.json()  # Don't forget 'await' on request.json()
+    image_url = body.get('image_url')
+    
+    if not image_url:
+        return {"message": "Image url is required"}
 
-    image = Image.open(io.BytesIO(await file.read())).convert("RGB")
+    try:
+        # 1. Download the image bytes using standard python libraries
+        req = urllib.request.Request(
+            image_url, 
+            headers={'User-Agent': 'Mozilla/5.0'} # Prevents 403 blocks from sites
+        )
+        
+        with urllib.request.urlopen(req) as response:
+            image_bytes = response.read()
 
-    vector = get_img_embedding(image)
+        # 2. Convert bytes to an in-memory stream and pass to PIL
+        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        
 
-    book_id = str(uuid.uuid4())
+        vector = get_img_embedding(image)
 
-    DB_Client.upsert(
-        collection_name=BOOK_COLLECTION_NAME,
-        points=[
-            PointStruct(
-                id=book_id,
-                vector=vector
-            )
-        ]
-    )
+        book_id = str(uuid.uuid4())
 
-    return {
-        "status": "stored",
-        "book_id": book_id
-    }
+        DB_Client.upsert(
+            collection_name=BOOK_COLLECTION_NAME,
+            points=[
+                PointStruct(
+                    id=book_id,
+                    vector=vector
+                )
+            ]
+        )
+
+        return {
+            "status": "stored",
+            "vector_id": book_id
+        }
+    except Exception as error:
+        print("error --->>", error)
+        return {"message": "Internal server error"}
 
 @router.post("/search")
 async def search_book(file: UploadFile = File(...)):
@@ -63,5 +80,17 @@ async def search_book(file: UploadFile = File(...)):
         }
         for r in results
     ]
+@router.delete("/delete-all")
+async def delete_all_book():
+    try:
+        # 1. Delete the collection entirely
+        DB_Client.delete_collection(collection_name=BOOK_COLLECTION_NAME)
+        
+        init_db()
+        return {"status": "success", "message": "All items cleared and collection reset."}
+        
+    except Exception as error:
+        print("error --->>", error)
+        return {"message": "Internal server error"}
     
     
