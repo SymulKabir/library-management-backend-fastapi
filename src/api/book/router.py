@@ -8,6 +8,8 @@ from qdrant_client.models import PointStruct, Distance, VectorParams
 from src.utils.embedding import get_img_embedding
 from pydantic import BaseModel
 import urllib.request 
+import httpx
+from src.shared.constants.url import MAIN_BACKEND_URL
  
 router = APIRouter()
 
@@ -56,30 +58,48 @@ async def upload_book(request: Request):
         print("error --->>", error)
         return {"message": "Internal server error"}
 
+
+
 @router.post("/search")
 async def search_book(file: UploadFile = File(...)):
-    if not file.content_type.startswith("image/"):
-        return {"error": "Only image files allowed"}
+    try:
+        if not file.content_type.startswith("image/"):
+            return {"error": "Only image files allowed"}
 
-    image = Image.open(io.BytesIO(await file.read())).convert("RGB")
+        image = Image.open(io.BytesIO(await file.read())).convert("RGB")
 
-    vector = get_img_embedding(image)
+        vector = get_img_embedding(image)
+        
+        results = DB_Client.query_points(
+            collection_name=BOOK_COLLECTION_NAME,
+            query=vector,
+            limit=10,
+            with_payload=True   
+        )
+        # ✅ SAFE CHECK (IMPORTANT)
+        if not results.points or len(results.points) == 0:
+            return {"status": "book not matched"}
+        results = results.points
+        vector_ids = [product.id for product in results if product.score > 0.7]
+        
+        
+        res = httpx.post(
+            f"{MAIN_BACKEND_URL}/books/get/by-vector-id",
+            json={"vector_ids": vector_ids},
+            timeout=10.0
+        )
 
-    results = DB_Client.search(
-        collection_name=BOOK_COLLECTION_NAME,
-        query_vector=vector,
-        limit=5
-    )
+        jsonRes = res.json()
 
-    return [
-        {
-            "id": r.id,
-            "score": r.score,
-            "title": r.payload.get("title"),
-            "author": r.payload.get("author"),
-        }
-        for r in results
-    ]
+        return {"data": jsonRes.get("data") or []}
+    except Exception as error:
+        print("error --->>", error)
+        return {"message": "Internal server error"}
+
+    
+
+    
+    
 @router.delete("/delete-all")
 async def delete_all_book():
     try:
